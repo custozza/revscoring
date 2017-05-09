@@ -139,103 +139,7 @@ class ThresholdClassification(Classification):
         return stats_doc
 
 
-class ThresholdOptimization(dict):
-    STRING_PATTERN = re.compile(
-        r"(maximum|minimum) "
-        r"([^\W\d][\w]*) @ "  # target_stat
-        r"([^\W\d][\w]*) "  # cond_stat
-        r"(>=|<=) "  # greater
-        r"([-+]?([0-9]*\.[0-9]+|[0-9]+))")  # cond_value
 
-    def __init__(self, maximize, target_stat, cond_stat, greater, cond_value):
-        """
-        Construct a structured statement about an optimization metric.
-
-        :Parameters:
-            maximize : `bool`
-                If True, maximize, else minimize
-            target_stat : `str`
-                The name of the target statistic that will be optimized
-            cond_stat : `str`
-                The name of the conditional statistic
-            greater : `bool`
-                The relationship between the conditional statistic and the
-                conditional value.  If True, cond_stat >= cond_value, else
-                cond_stat <= cond_value
-            cond_value : `float`
-                The conditional value
-        """
-        self.maximize = maximize
-        self.target_stat = target_stat
-        self.cond_stat = cond_stat
-        self.greater = greater
-        self.cond_value = cond_value
-
-    def __str__(self):
-        return "{0} {1} @ {2} {3} {4}" \
-               .format("maximum" if self.maximize else "minimum",
-                       self.target_stat,
-                       self.cond_stat,
-                       ">=" if self.greater else "<=",
-                       self.cond_value)
-
-    def repr(self):
-        return "{0}.p({1!r})".format(self.__class__.__name__,
-                                     str(self))
-
-    def optimize_from(self, threshold_statistics):
-        """
-        Generates an optimized value by scanning a sequence of
-        :class:`~revscoring.scoring.statistics.threshold_classification.ThresholdStatistics`
-        for a the best threshold that matches the conditional criteria
-        """  # noqa
-        if self.greater:
-            filtered = [(lstats.get_stat(self.target_stat), t, lstats)
-                        for t, lstats in threshold_statistics
-                        if lstats.get_stat(self.cond_stat) >= self.cond_value]
-        else:
-            filtered = [(lstats.get_stat(self.target_stat), t, lstats)
-                        for t, lstats in threshold_statistics
-                        if lstats.get_stat(self.cond_stat) <= self.cond_value]
-
-        if not filtered:
-            return None
-
-        if self.maximize:
-            return max(filtered)[0]
-        else:
-            return min(filtered)[0]
-
-    @classmethod
-    def parse(cls, pattern):
-        """
-        Parse a formatted string representing a threshold optimization. E.g.
-        'maximum recall @ precision >= 0.9' or
-        'minimum match_rate @ recall >= 0.9'.
-
-        :Parameters:
-            pattern : `str`
-                The optimization pattern to parse
-        """
-        match = cls.STRING_PATTERN.match(pattern.strip().lower())
-        if match is None:
-            raise ValueError('{0!r} does not match optimization pattern: '
-                             .format(pattern) +
-                             '"(maximum|minimum) <target> @ ' +
-                             '<cond> (>=|<=) [float]"')
-        maximize, target, cond, greater, cond_value, _ = match.groups()
-        return cls(maximize == "maximum",
-                   target, cond,
-                   greater == ">=",
-                   float(cond_value))
-
-    @classmethod
-    def from_string(cls, p):
-        return cls.parse(p)
-
-    @classmethod
-    def p(cls, p):
-        return cls.parse(p)
 
 
 class ThresholdStatistics(list):
@@ -284,29 +188,6 @@ class ThresholdStatistics(list):
         return zero_to_one_auc([stat.recall() for t, stat in self],
                                [stat.precision() for t, stat in self])
 
-    def get_stat(self, stat_name):
-        if not hasattr(self, stat_name):
-            if stat_name in self.threshold_optimizations:
-                optimization = self.threshold_optimizations[stat_name]
-                return optimization.optimize_from(self)
-            else:
-                raise KeyError(stat_name)
-        else:
-            return getattr(self, stat_name)()
-
-    def best(self, stat_name, at_value):
-        for threshold, lstats in self:
-            target_stat = lstats.get_stat(stat_name)
-            if target_stat >= at_value:
-                return threshold, lstats
-
-    def optimize(self, optimize, stat_name, at_value):
-        best_threshold = self.best(stat_name, at_value)
-        if best_threshold is None:
-            return None
-        else:
-            threshold, lstats = best_threshold
-            return lstats.get_stat(stat_name)
 
 
 def zero_to_one_auc(x_vals, y_vals):
@@ -317,47 +198,3 @@ def zero_to_one_auc(x_vals, y_vals):
         y_interp = interp(
             x_space, list(reversed(x_vals)), list(reversed(y_vals)))
     return auc(x_space, y_interp)
-
-
-class ThresholdStatList(list):
-    def __init__(self, threshold_stats, max_thresholds):
-        """
-        Construct a limited set of
-        :class:`~revscoring.scoring.statistics.classification.LabelStatistics`
-        at a representative set of thresholds.
-
-        :Parameters:
-            threshold_stats : :class:`~revscoring.scoring.statistics.threshold_classification.ThresholdStatistics`
-                The threshold statistics to limit
-            max_thresholds : int
-                The maximum number of thresholds to be represented in the list
-        """
-        if max_thresholds is None or len(threshold_stats) < max_thresholds:
-            limited_threshold_stats = threshold_stats
-        else:
-            step = len(threshold_stats) / max_thresholds
-            float_i = 0
-            limited_threshold_stats = []
-            while float_i <= len(threshold_stats) - 2:
-                limited_threshold_stats.append(threshold_stats[int(float_i)])
-                float_i += step
-            limited_threshold_stats.append(threshold_stats[-1])
-
-        super().__init__(limited_threshold_stats)
-
-    def format_str(self, fields=None, ndigits=3, **kwargs):
-        fields = fields or LabelStatistics.FIELDS
-        table_data = [[util.round(threshold, ndigits + 2)] +
-                      [util.round(tstats.get_stat(field), ndigits)
-                       for field in fields]
-                      for threshold, tstats in self]
-        headers = ['threshold'] + fields
-        return tabulate.tabulate(table_data, headers=headers)
-
-    def format_json(self, fields=None, ndigits=3, **kwargs):
-        thresholds_doc = []
-        for threshold, tstats in self:
-            tstats_doc = tstats.format_json(fields, ndigits=3, **kwargs)
-            tstats_doc['threshold'] = threshold
-            thresholds_doc.append(tstats_doc)
-        return thresholds_doc
